@@ -279,6 +279,9 @@ pub mod types;
 /// Utility types for working with Rithmic data.
 pub mod util;
 
+/// 出站代理（env `RITHMIC_PROXY`）：socks5/socks5h/http/https 隧道。
+/// 公开给下游复用（例如登录探针直连场景），保证探针与主连接走同一代理。
+pub mod proxy;
 mod ws;
 
 /// The `prost` these types are generated against, so downstream decoding uses

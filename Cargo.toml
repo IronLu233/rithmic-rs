@@ -27,6 +27,11 @@ prost = "0.14.3"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 tokio-tungstenite = { version = "0.30.0", features = ["native-tls"] }
 tracing = "0.1.44"
+# 出站代理（env RITHMIC_PROXY）：socks5/socks5h 隧道 + https 代理的 TLS 一跳
+tokio-socks = "0.5"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+base64 = "0.22"
 
 [dev-dependencies]
 dotenvy = "0.15.7"
@@ -34,3 +39,6 @@ prost-build = "0.14.3"
 temp-env = "0.3"
 tokio = { version = "1.50.0", features = ["test-util"] }
 tracing-subscriber = "0.3.23"
+
+# 本地补丁标记：自成 workspace 根，便于独立跑测试（被 prism [patch] 引用不受影响）
+[workspace]

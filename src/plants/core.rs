@@ -7,15 +7,11 @@ use futures_util::{
 };
 
 use tokio::{
-    net::TcpStream,
     sync::{broadcast, mpsc, oneshot},
     time::Interval,
 };
 
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
-    tungstenite::{Error, Message, error::ProtocolError},
-};
+use tokio_tungstenite::tungstenite::{Error, Message, error::ProtocolError};
 
 use crate::{
     ConnectStrategy,
@@ -34,7 +30,7 @@ use crate::{
     },
 };
 
-pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type WsStream = crate::proxy::WsStream;
 pub(crate) type WsSink = SplitSink<WsStream, Message>;
 pub(crate) type WsReader = SplitStream<WsStream>;
 
@@ -650,7 +646,10 @@ mod tests {
     };
 
     use futures_util::StreamExt;
+    use tokio::net::TcpStream;
     use tokio::sync::{broadcast, oneshot};
+    use tokio_tungstenite::MaybeTlsStream;
+    use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::tungstenite::{Error, Message, error::ProtocolError};
 
     use super::*;
@@ -775,7 +774,7 @@ mod tests {
         let (server_tcp, _) = server_result.unwrap();
 
         // Wrap both sides in MaybeTlsStream::Plain so the type matches WsStream.
-        let server_stream = MaybeTlsStream::Plain(server_tcp);
+        let server_stream = MaybeTlsStream::Plain(Box::new(server_tcp) as crate::proxy::BoxedIoStream);
 
         // Build a raw WebSocket on the server side (no HTTP upgrade needed for
         // our purposes — we only need the type, not actual messages).
@@ -804,7 +803,11 @@ mod tests {
         let (server_tcp, _) = server_result.unwrap();
 
         let server_ws =
-            WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(server_tcp), Role::Server, None)
+            WebSocketStream::from_raw_socket(
+            MaybeTlsStream::Plain(Box::new(server_tcp) as crate::proxy::BoxedIoStream),
+            Role::Server,
+            None,
+        )
                 .await;
 
         let (_, reader) = server_ws.split();

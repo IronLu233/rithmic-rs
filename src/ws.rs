@@ -2,15 +2,14 @@ use futures_util::{Sink, SinkExt};
 use std::time::Duration;
 use tracing::{info, warn};
 
-use tokio::{
-    net::TcpStream,
-    time::{Instant, Interval, interval_at, sleep, timeout},
-};
+use tokio::time::{Instant, Interval, interval_at, sleep, timeout};
 
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
-    tungstenite::{Error, Message},
+    client_async_tls_with_config,
+    tungstenite::{Error, Message, client::IntoClientRequest},
 };
+
+use crate::proxy::{self, WsStream};
 
 /// Number of seconds between heartbeats sent to the server when the login
 /// response carries no interval of its own.
@@ -27,6 +26,10 @@ pub(crate) const SEND_TIMEOUT_SECS: u64 = 10;
 
 /// Connection attempt timeout in seconds.
 const CONNECT_TIMEOUT_SECS: u64 = 2;
+
+/// Connection attempt timeout in seconds when a proxy is configured — the
+/// socks/CONNECT handshake plus TLS plus WS upgrade must all fit inside.
+const PROXY_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// Base backoff in milliseconds multiplied by the attempt number.
 const BACKOFF_MS_BASE: u64 = 500;
@@ -107,6 +110,38 @@ pub(crate) fn get_ping_interval() -> Interval {
     interval_at(start_offset, ping_interval)
 }
 
+/// Single connection attempt: direct or tunneled through the proxy configured
+/// in `RITHMIC_PROXY` (socks5 / socks5h / http / https). TLS and the WebSocket
+/// upgrade are handled by tokio-tungstenite over the resulting stream.
+///
+/// The timeout covers tunnel + TLS + WS handshake, widened to
+/// [`PROXY_CONNECT_TIMEOUT_SECS`] when a proxy is in play.
+async fn connect_once(url: &str) -> Result<WsStream, Error> {
+    let request = url.into_client_request()?;
+    let proxy_spec = proxy::proxy_from_env();
+    let timeout_secs = if proxy_spec.is_some() {
+        PROXY_CONNECT_TIMEOUT_SECS
+    } else {
+        CONNECT_TIMEOUT_SECS
+    };
+
+    let handshake = async {
+        let stream = proxy::connect_stream_via(request.uri(), proxy_spec.as_ref()).await?;
+        client_async_tls_with_config(request, stream, None, None).await
+    };
+
+    let (ws_stream, _) = timeout(Duration::from_secs(timeout_secs), handshake)
+        .await
+        .map_err(|_| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "connection attempt timed out",
+            ))
+        })??;
+
+    Ok(ws_stream)
+}
+
 /// Connect to a single URL without retry.
 ///
 /// Bounded by [`CONNECT_TIMEOUT_SECS`] so `Simple` fast-fails instead of
@@ -117,20 +152,10 @@ pub(crate) fn get_ping_interval() -> Interval {
 ///
 /// # Returns
 /// WebSocketStream on success, error on failure or timeout.
-async fn connect(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, Error> {
+async fn connect(url: &str) -> Result<WsStream, Error> {
     info!("Connecting to {}", url);
 
-    let (ws_stream, _) = timeout(
-        Duration::from_secs(CONNECT_TIMEOUT_SECS),
-        connect_async_with_config(url, None, true),
-    )
-    .await
-    .map_err(|_| {
-        Error::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "connection attempt timed out",
-        ))
-    })??;
+    let ws_stream = connect_once(url).await?;
 
     info!("Successfully connected to {}", url);
 
@@ -159,7 +184,7 @@ fn jittered(ms: u64) -> u64 {
 /// `urls` is cycled by attempt number: pass one URL to retry it, or
 /// primary + beta to alternate between them. Never returns until a
 /// connection succeeds.
-async fn connect_with_retry(urls: &[&str]) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+async fn connect_with_retry(urls: &[&str]) -> WsStream {
     let mut attempt: u64 = 1;
 
     loop {
@@ -167,18 +192,12 @@ async fn connect_with_retry(urls: &[&str]) -> WebSocketStream<MaybeTlsStream<Tcp
 
         info!("Attempt {}: connecting to {}", attempt, url);
 
-        match timeout(
-            Duration::from_secs(CONNECT_TIMEOUT_SECS),
-            connect_async_with_config(url, None, true),
-        )
-        .await
-        {
-            Ok(Ok((ws_stream, _))) => {
+        match connect_once(url).await {
+            Ok(ws_stream) => {
                 info!("Successfully connected to {}", url);
                 return ws_stream;
             }
-            Ok(Err(e)) => warn!("connect_async failed for {}: {:?}", url, e),
-            Err(e) => warn!("connect_async to {} timed out: {:?}", url, e),
+            Err(e) => warn!("connect failed for {}: {:?}", url, e),
         }
 
         let backoff_ms = BACKOFF_MS_BASE
@@ -207,7 +226,7 @@ pub(crate) async fn connect_with_strategy(
     primary_url: &str,
     beta_url: &str,
     strategy: ConnectStrategy,
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, Error> {
+) -> Result<WsStream, Error> {
     match strategy {
         ConnectStrategy::Simple => connect(primary_url).await,
         ConnectStrategy::Retry => Ok(connect_with_retry(&[primary_url]).await),

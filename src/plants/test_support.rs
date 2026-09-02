@@ -44,7 +44,12 @@ pub(crate) async fn core_with_wire(source: &str) -> (PlantCore, TcpStream) {
     let (server, _) = server.unwrap();
 
     let server_ws =
-        WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(server), Role::Server, None).await;
+        WebSocketStream::from_raw_socket(
+        MaybeTlsStream::Plain(Box::new(server) as crate::proxy::BoxedIoStream),
+        Role::Server,
+        None,
+    )
+    .await;
     let (rithmic_sender, rithmic_reader) = server_ws.split();
 
     let config = RithmicConfig::builder(RithmicEnv::Demo)
